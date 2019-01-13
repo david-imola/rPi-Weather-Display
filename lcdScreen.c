@@ -67,7 +67,7 @@ void lcd4bitInit(const struct lcd4bit *lcd)
     _lcd4bitWrite(lcd, 0x06, LCD_CMD); //move cursor
     _lcd4bitWrite(lcd, 0x0C, LCD_CMD); // Turn cursor off
     _lcd4bitWrite(lcd, 0x28, LCD_CMD); //2 line display
-    clearDisplay(lcd);
+    lcd4bitClearScreen(lcd);
     sleepForProcessing();
 
 }

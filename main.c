@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <signal.h>
 #include <time.h>
+#include <fcntl.h>
 
 //http://wiringpi.com/download-and-install/
 //compile with -lwiringPi
@@ -22,6 +23,14 @@
 
 #define IP_ADDR_LENGTH 15
 #define PUBLC_IP_URL "http://checkip.amazonaws.com"
+
+#define WEATHER_URL_FORM "https://api.openweathermap.org/data/2.5/weather?zip=%s&appid=e1554207a4c8d53ce7e5825ffe374e50&units=metric"
+#define WEATHER_URL_LEN  112
+
+#define ZIPCODE_FILE "ZIPCODE"
+#define ZIPCODE_LEN 5
+
+
 
 #define TRANSISTOR 21
 
@@ -53,8 +62,11 @@ static void lcdOn()
     pinMode(lcd.d6, OUTPUT);
     pinMode(lcd.d7, OUTPUT);
 
-    lcd4bitInit(&lcd);
     digitalWrite(TRANSISTOR, 1);
+
+    usleep(500);
+
+    lcd4bitInit(&lcd);
 }
 
 static void lcdOff()
@@ -69,76 +81,103 @@ static void lcdOff()
     pinMode(lcd.d7, INPUT);
 }
 
-
+struct stringData
+{
+    size_t usedSize;
+    size_t allocSize;
+    char * string;
+};
 
 //normally we would do a realloc here, but since we know the webpage is only 15 chars max,
 //we can just alloce a 15 char array beforehand
-static size_t webIpWriteCb(char *ptr, size_t size, size_t nmemb, char *ipaddr)
+static size_t webWriteCb(char *ptr, size_t size, size_t nmemb, struct stringData * pageData)
 {
     size_t writeSize = size * nmemb;
+    size_t newSize = pageData->usedSize + writeSize;
 
-    char * startIndex;
-    for(startIndex = ipaddr;
-        *startIndex != '\0';
-        ++startIndex);
+    if(newSize > pageData->allocSize)
+    {
+        pageData->string = realloc(pageData->string, newSize);
+        pageData->allocSize = newSize; //if this loop is ever entered, the two variables become redundant
+    }
 
-
-        
-    //TODO delete newline character from the ptr string
+    char * startIndex = pageData->string + pageData->usedSize - 1; // -1 for the null char at the end
     memcpy(startIndex, ptr, writeSize);
-
     startIndex[writeSize] = '\0';
+    pageData->usedSize = newSize;
 
     return writeSize;
 }
 
 
-static void getPublicIp(char * buffer)
+static char *getWebpageAlloc(size_t initSize, size_t * sizeBuf, const char * url)
 {
     CURL * curl;
 
-    buffer[0] = '\0';
+    struct stringData pageString;
+    pageString.string = malloc(sizeof(char) * initSize);
+    pageString.string[0] = '\0';
+    pageString.usedSize = 1;
+    pageString.allocSize = initSize;
 
     curl = curl_easy_init();
     if(curl)
     {
-        curl_easy_setopt(curl, CURLOPT_URL, PUBLC_IP_URL);
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, webIpWriteCb);
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, buffer);
-
+        curl_easy_setopt(curl, CURLOPT_URL, url);
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, webWriteCb);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &pageString);
         CURLcode res = curl_easy_perform(curl);
         if(res != CURLE_OK) {
             fprintf(stderr, "curl_easy_perform() failed: %s\n",  
                     curl_easy_strerror(res));
+            if(sizeBuf)
+                *sizeBuf = 0;
+            return NULL;
         }
         curl_easy_cleanup(curl);
+        if(sizeBuf)
+            *sizeBuf = pageString.usedSize - 1; //-1 to not include the null terminator
+        return pageString.string;
+    }
+    else
+    {
+        if(sizeBuf)
+            *sizeBuf = 0;
+        return NULL;
     }
 
 }
 
-static void buttonCallback()
+static void buttonCallback(const char * url)
 {
     digitalWrite(LIGHT_RED, 1);
 
-    lcdOn();
+    size_t jsonLen;
+    char * weatherJSON = getWebpageAlloc(500, &jsonLen, url);
 
-    usleep(500);
 
-    lcd4bitText(&lcd, "hello world", LCD_LINE_1);
+    double temp = mjson_get_number(weatherJSON, jsonLen, "$.main.temp", 100);
+    double humidity = mjson_get_number(weatherJSON, jsonLen, "$.main.humidity", 101);
 
-    char ip [IP_ADDR_LENGTH + 1];
-    getPublicIp(ip);
-    lcd4bitText(&lcd, ip, LCD_LINE_2);
+    char numBuf [LCD_LINELENGTH];
+    snprintf(numBuf, LCD_LINELENGTH, "%4.1fC, %3.0f%%H", temp, humidity);
 
-    printf("\"%s\"", ip);
+    char descrBuf [LCD_LINELENGTH * 2];
+    int descrLen = mjson_get_string(weatherJSON, jsonLen, "$.weather[0].description", descrBuf, sizeof(descrBuf));
 
-    //mjson_get_string()
-
-    usleep(USECS(4.5));
-    
-    //clearDisplay(&lcd);    
+    free(weatherJSON);
 
     digitalWrite(LIGHT_RED, 0);
+    lcdOn();
+    lcd4bitText(&lcd, numBuf, LCD_LINE_1);
+
+    for(int i =0, unshown = descrLen - LCD_LINELENGTH; i <= unshown || i == 0; ++i)
+    {
+        lcd4bitText(&lcd, descrBuf + i, LCD_LINE_2);
+        usleep(USECS(0.5));
+    }
+
+    usleep(USECS(6));
 
 
     lcdOff();
@@ -154,8 +193,17 @@ int main(int argc, char *argv[])
 {
     signal(SIGINT, endProgram);
 
-    wiringPiSetup();
+    //get zip code
+    int f_id = open(ZIPCODE_FILE, O_RDONLY);
+    char zip[ZIPCODE_LEN];
+    read(f_id, zip, ZIPCODE_LEN);
+    close(f_id);
+    //create the url
+    char urlBuf[WEATHER_URL_LEN];
+    sprintf(urlBuf, WEATHER_URL_FORM, zip);
 
+    //set up gpio
+    wiringPiSetup();
     pinMode(LIGHT_RED, OUTPUT);
     pinMode(BUTTON, INPUT);
     pinMode(TRANSISTOR, OUTPUT);
@@ -176,7 +224,7 @@ int main(int argc, char *argv[])
        {
            prevState = 0;
            if(clock() - t >= CLICK_THRESHOLD)
-                buttonCallback(); //click registered
+                buttonCallback(urlBuf); //click registered
        }
     }
 

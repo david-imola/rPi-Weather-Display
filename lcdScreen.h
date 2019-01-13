@@ -11,7 +11,7 @@
 #define LCD_LINE_1 0x80
 #define LCD_LINE_2 0xC0
 
-#define clearDisplay(lcd)  _lcd4bitWrite(lcd, 0x01, LCD_CMD);
+#define lcd4bitClearScreen(lcd_ptr)  _lcd4bitWrite(lcd_ptr, 0x01, LCD_CMD);
 
 struct lcd4bit
 {
